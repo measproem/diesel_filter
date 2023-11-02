@@ -1,6 +1,10 @@
 use diesel::{
-    pg::Pg, prelude::*, query_builder::*, query_dsl::methods::LoadQuery, sql_types::BigInt,
+    pg::Pg, prelude::*, query_builder::*,  sql_types::BigInt,
 };
+use diesel_async::pooled_connection::AsyncDieselConnectionManager;
+use diesel_async::{RunQueryDsl, AsyncPgConnection};
+use diesel_async::methods::LoadQuery;
+use deadpool::managed::Object;
 
 pub use diesel_filter_query::*;
 
@@ -46,7 +50,7 @@ impl<T> Paginate for T {
         Paginated {
             query: self,
             per_page: DEFAULT_PER_PAGE,
-            page: page,
+            page,
             offset: (page - 1) * DEFAULT_PER_PAGE,
         }
     }
@@ -71,23 +75,36 @@ impl<T> Paginated<T> {
         }
     }
 
-    pub fn load_and_count<'a, U>(self, conn: &mut PgConnection) -> QueryResult<(Vec<U>, i64)>
+    pub async fn load_and_count<'a, U>(
+        self,
+        conn: &mut Object<AsyncDieselConnectionManager<AsyncPgConnection>>,
+    ) -> QueryResult<(Vec<U>, i64)>
     where
-        Self: LoadQuery<'a, PgConnection, (U, i64)>,
+        Self: LoadQuery<'a, AsyncPgConnection, (U, i64)> + 'a,
+        U: Send,
     {
-        let results = self.load::<(U, i64)>(conn)?;
+        let per_page = self.per_page;
+        let results = self
+            .load::<(U, i64)>(conn)
+            .await
+            .map_err(|_err|  diesel::result::Error::NotFound)?;
+    
         let total = results.get(0).map(|x| x.1).unwrap_or(0);
         let records = results.into_iter().map(|x| x.0).collect();
-        let total_pages = total as i64;
+        let total_pages = (total as f64 / per_page as f64).ceil() as i64;
+    
         Ok((records, total_pages))
     }
+    
+
 }
 
 impl<T: Query> Query for Paginated<T> {
     type SqlType = (T::SqlType, BigInt);
 }
 
-impl<T> RunQueryDsl<PgConnection> for Paginated<T> {}
+
+// impl<T> RunQueryDsl<AsyncPgConnection> for Paginated<T> {}
 
 impl<T> QueryFragment<Pg> for Paginated<T>
 where
